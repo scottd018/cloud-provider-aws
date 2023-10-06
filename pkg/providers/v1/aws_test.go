@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -42,7 +43,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
+	informercorev1 "k8s.io/client-go/informers/core/v1"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
+	cloudprovider "k8s.io/cloud-provider"
 	cloudvolume "k8s.io/cloud-provider/volume"
 )
 
@@ -4031,6 +4037,733 @@ func TestInstanceIDIndexFunc(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("InstanceIDIndexFunc() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func pointerStr(str string) *string {
+	return &str
+}
+
+func pointerInt64(i int64) *int64 {
+	return &i
+}
+
+func pointerBool(b bool) *bool {
+	return &b
+}
+
+func TestCloud_findSubnets(t *testing.T) {
+	vpcId := pointerStr("vpc-00a0eb02c4218ea2d")
+	ownerId := pointerStr("400000000000")
+
+	publicTags := []*ec2.Tag{
+		{
+			Key:   pointerStr("environment"),
+			Value: pointerStr("PoC - Dev"),
+		},
+		{
+			Key:   pointerStr("description"),
+			Value: pointerStr("Managed by Terraform - do not modify"),
+		},
+	}
+
+	privateTags := []*ec2.Tag{
+		{
+			Key:   pointerStr("kubernetes.io/cluster/andromeda.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("SubnetType"),
+			Value: pointerStr("Private"),
+		},
+		{
+			Key:   pointerStr("for-use-with-amazon-emr-managed-policies"),
+			Value: pointerStr("n/a"),
+		},
+		{
+			Key:   pointerStr("environment"),
+			Value: pointerStr("PoC - Dev"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/bootes.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/role/internal-elb"),
+			Value: pointerStr("1"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/centaur.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/andromeda.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("description"),
+			Value: pointerStr("Managed by Terraform - do not modify"),
+		},
+	}
+
+	allSubnets := []*ec2.Subnet{
+		{
+			AvailabilityZone:        pointerStr("us-east-1b"),
+			AvailabilityZoneId:      pointerStr("use1-az1"),
+			AvailableIpAddressCount: pointerInt64(15),
+			CidrBlock:               pointerStr("10.3.240.64/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-0654d15954855f678"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1b"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-03cb4267c0e04de15"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1a"),
+			AvailabilityZoneId:      pointerStr("use1-az6"),
+			AvailableIpAddressCount: pointerInt64(4),
+			CidrBlock:               pointerStr("10.3.240.0/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-0b821ff26c16ab814"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1a"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-0b821ff26c16ab814"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1f"),
+			AvailabilityZoneId:      pointerStr("use1-az5"),
+			AvailableIpAddressCount: pointerInt64(48),
+			CidrBlock:               pointerStr("10.3.241.64/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-089b77e7410afbffc"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags,
+				&ec2.Tag{
+					Key:   pointerStr("Name"),
+					Value: pointerStr("private-GED-us-east-1f"),
+				},
+				// &ec2.Tag{
+				// 	Key:   pointerStr("kubernetes.io/cluster/rosav1-nqfwp"),
+				// 	Value: pointerStr("shared"),
+				// },
+			),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-089b77e7410afbffc"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1e"),
+			AvailabilityZoneId:      pointerStr("use1-az3"),
+			AvailableIpAddressCount: pointerInt64(53),
+			CidrBlock:               pointerStr("10.3.241.0/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-09b551ae9080f9e09"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1e"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-09b551ae9080f9e09"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1a"),
+			AvailabilityZoneId:      pointerStr("use1-az6"),
+			AvailableIpAddressCount: pointerInt64(54),
+			CidrBlock:               pointerStr("10.3.241.128/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-041edac8b8ee9ca1e"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(publicTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("public-GED-us-east-1a"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-041edac8b8ee9ca1e"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1d"),
+			AvailabilityZoneId:      pointerStr("use1-az4"),
+			AvailableIpAddressCount: pointerInt64(38),
+			CidrBlock:               pointerStr("10.3.240.192/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-037f85e8d0ac522bf"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1d"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-037f85e8d0ac522bf"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1b"),
+			AvailabilityZoneId:      pointerStr("use1-az1"),
+			AvailableIpAddressCount: pointerInt64(58),
+			CidrBlock:               pointerStr("10.3.241.192/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-070106850be5ea4b4"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(publicTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("public-GED-us-east-1b"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-070106850be5ea4b4"),
+		},
+	}
+
+	awsServices := newMockedFakeAWSServices(TestClusterID)
+	c, _ := newAWSCloud(CloudConfig{}, awsServices)
+
+	ec2 := &FakeEC2Impl{
+		Subnets: allSubnets,
+		RouteTables: []*ec2.RouteTable{
+			// private
+			{
+				VpcId:        vpcId,
+				OwnerId:      ownerId,
+				RouteTableId: pointerStr("rtb-050839aaecc6e2882"),
+				Associations: []*ec2.RouteTableAssociation{
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2e"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-037f85e8d0ac522bf"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2f"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-0654d15954855f678"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2g"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-0b821ff26c16ab814"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2h"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-089b77e7410afbffc"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2a"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-09b551ae9080f9e09"),
+					},
+				},
+				Routes: []*ec2.Route{
+					{
+						DestinationCidrBlock: pointerStr("0.0.0.0/0"),
+						NatGatewayId:         pointerStr("nat-042f61761ad1b2bd2"),
+						Origin:               pointerStr("CreateRoute"),
+						State:                pointerStr("active"),
+					},
+					{
+						DestinationCidrBlock: pointerStr("10.3.240.0/23"),
+						GatewayId:            pointerStr("local"),
+						Origin:               pointerStr("CreateRouteTable"),
+						State:                pointerStr("active"),
+					},
+				},
+			},
+
+			// public
+			{
+				VpcId:        vpcId,
+				OwnerId:      ownerId,
+				RouteTableId: pointerStr("rtb-050839aaecc6e2883"),
+				Associations: []*ec2.RouteTableAssociation{
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d20"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2883"),
+						SubnetId:                pointerStr("subnet-070106850be5ea4b4"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d21"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2883"),
+						SubnetId:                pointerStr("subnet-041edac8b8ee9ca1e"),
+					},
+				},
+				Routes: []*ec2.Route{
+					{
+						DestinationCidrBlock: pointerStr("0.0.0.0/0"),
+						GatewayId:            pointerStr("igw-0be55db08bd331c3a"),
+						Origin:               pointerStr("CreateRoute"),
+						State:                pointerStr("active"),
+					},
+					{
+						DestinationCidrBlock: pointerStr("10.3.240.0/23"),
+						GatewayId:            pointerStr("local"),
+						Origin:               pointerStr("CreateRouteTable"),
+						State:                pointerStr("active"),
+					},
+				},
+			},
+		},
+		aws: awsServices,
+	}
+
+	type fields struct {
+		ec2                   EC2
+		elb                   ELB
+		elbv2                 ELBV2
+		metadata              EC2Metadata
+		cfg                   *CloudConfig
+		region                string
+		vpcID                 string
+		tagging               awsTagging
+		selfAWSInstance       *awsInstance
+		instanceCache         instanceCache
+		clientBuilder         cloudprovider.ControllerClientBuilder
+		kubeClient            clientset.Interface
+		nodeInformer          informercorev1.NodeInformer
+		nodeInformerHasSynced cache.InformerSynced
+		eventBroadcaster      record.EventBroadcaster
+		eventRecorder         record.EventRecorder
+		attachingMutex        sync.Mutex
+		attaching             map[types.NodeName]map[mountDevice]EBSVolumeID
+		deviceAllocators      map[types.NodeName]DeviceAllocator
+	}
+
+	tests := []struct {
+		name   string
+		fields fields
+		//want    []*ec2.Subnet
+		wantErr bool
+	}{
+		{
+			name: "test",
+			fields: fields{
+				ec2:     ec2,
+				cfg:     c.cfg,
+				vpcID:   *vpcId,
+				tagging: awsTagging{ClusterID: "rosav1-nqfwp"},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Cloud{
+				ec2:                   tt.fields.ec2,
+				elb:                   tt.fields.elb,
+				elbv2:                 tt.fields.elbv2,
+				metadata:              tt.fields.metadata,
+				cfg:                   tt.fields.cfg,
+				region:                tt.fields.region,
+				vpcID:                 tt.fields.vpcID,
+				tagging:               tt.fields.tagging,
+				selfAWSInstance:       tt.fields.selfAWSInstance,
+				instanceCache:         tt.fields.instanceCache,
+				clientBuilder:         tt.fields.clientBuilder,
+				kubeClient:            tt.fields.kubeClient,
+				nodeInformer:          tt.fields.nodeInformer,
+				nodeInformerHasSynced: tt.fields.nodeInformerHasSynced,
+				eventBroadcaster:      tt.fields.eventBroadcaster,
+				eventRecorder:         tt.fields.eventRecorder,
+				attachingMutex:        tt.fields.attachingMutex,
+				attaching:             tt.fields.attaching,
+				deviceAllocators:      tt.fields.deviceAllocators,
+			}
+			subnets, err := c.findSubnets()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Cloud.findSubnets() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			t.Errorf("%+v", subnets)
+			// if !reflect.DeepEqual(got, tt.want) {
+			// 	t.Errorf("Cloud.findSubnets() = %v, want %v", got, tt.want)
+			// }
+		})
+	}
+}
+
+func TestCloud_findELBSubnets(t *testing.T) {
+	vpcId := pointerStr("vpc-00a0eb02c4218ea2d")
+	ownerId := pointerStr("400000000000")
+
+	publicTags := []*ec2.Tag{
+		{
+			Key:   pointerStr("environment"),
+			Value: pointerStr("PoC - Dev"),
+		},
+		{
+			Key:   pointerStr("description"),
+			Value: pointerStr("Managed by Terraform - do not modify"),
+		},
+	}
+
+	privateTags := []*ec2.Tag{
+		{
+			Key:   pointerStr("kubernetes.io/cluster/andromeda.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("SubnetType"),
+			Value: pointerStr("Private"),
+		},
+		{
+			Key:   pointerStr("for-use-with-amazon-emr-managed-policies"),
+			Value: pointerStr("n/a"),
+		},
+		{
+			Key:   pointerStr("environment"),
+			Value: pointerStr("PoC - Dev"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/bootes.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/role/internal-elb"),
+			Value: pointerStr("1"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/centaur.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("kubernetes.io/cluster/andromeda.awsged.com"),
+			Value: pointerStr("shared"),
+		},
+		{
+			Key:   pointerStr("description"),
+			Value: pointerStr("Managed by Terraform - do not modify"),
+		},
+	}
+
+	allSubnets := []*ec2.Subnet{
+		{
+			AvailabilityZone:        pointerStr("us-east-1b"),
+			AvailabilityZoneId:      pointerStr("use1-az1"),
+			AvailableIpAddressCount: pointerInt64(15),
+			CidrBlock:               pointerStr("10.3.240.64/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-0654d15954855f678"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1b"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-03cb4267c0e04de15"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1a"),
+			AvailabilityZoneId:      pointerStr("use1-az6"),
+			AvailableIpAddressCount: pointerInt64(4),
+			CidrBlock:               pointerStr("10.3.240.0/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-0b821ff26c16ab814"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1a"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-0b821ff26c16ab814"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1f"),
+			AvailabilityZoneId:      pointerStr("use1-az5"),
+			AvailableIpAddressCount: pointerInt64(48),
+			CidrBlock:               pointerStr("10.3.241.64/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-089b77e7410afbffc"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags,
+				&ec2.Tag{
+					Key:   pointerStr("Name"),
+					Value: pointerStr("private-GED-us-east-1f"),
+				},
+				&ec2.Tag{
+					Key:   pointerStr("kubernetes.io/cluster/rosav1-nqfwp"),
+					Value: pointerStr("shared"),
+				},
+			),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-089b77e7410afbffc"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1e"),
+			AvailabilityZoneId:      pointerStr("use1-az3"),
+			AvailableIpAddressCount: pointerInt64(53),
+			CidrBlock:               pointerStr("10.3.241.0/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-09b551ae9080f9e09"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1e"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-09b551ae9080f9e09"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1a"),
+			AvailabilityZoneId:      pointerStr("use1-az6"),
+			AvailableIpAddressCount: pointerInt64(54),
+			CidrBlock:               pointerStr("10.3.241.128/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-041edac8b8ee9ca1e"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(publicTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("public-GED-us-east-1a"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-041edac8b8ee9ca1e"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1d"),
+			AvailabilityZoneId:      pointerStr("use1-az4"),
+			AvailableIpAddressCount: pointerInt64(38),
+			CidrBlock:               pointerStr("10.3.240.192/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-037f85e8d0ac522bf"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(privateTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("private-GED-us-east-1d"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-037f85e8d0ac522bf"),
+		},
+		{
+			AvailabilityZone:        pointerStr("us-east-1b"),
+			AvailabilityZoneId:      pointerStr("use1-az1"),
+			AvailableIpAddressCount: pointerInt64(58),
+			CidrBlock:               pointerStr("10.3.241.192/26"),
+			DefaultForAz:            pointerBool(false),
+			State:                   pointerStr("available"),
+			SubnetId:                pointerStr("subnet-070106850be5ea4b4"),
+			VpcId:                   vpcId,
+			OwnerId:                 ownerId,
+			Tags: append(publicTags, &ec2.Tag{
+				Key:   pointerStr("Name"),
+				Value: pointerStr("public-GED-us-east-1b"),
+			}),
+			SubnetArn: pointerStr("arn:aws:ec2:us-east-1:400000000000:subnet/subnet-070106850be5ea4b4"),
+		},
+	}
+
+	awsServices := newMockedFakeAWSServices(TestClusterID)
+	c, _ := newAWSCloud(CloudConfig{}, awsServices)
+
+	ec2 := &FakeEC2Impl{
+		Subnets: allSubnets,
+		RouteTables: []*ec2.RouteTable{
+			// private
+			{
+				VpcId:        vpcId,
+				OwnerId:      ownerId,
+				RouteTableId: pointerStr("rtb-050839aaecc6e2882"),
+				Associations: []*ec2.RouteTableAssociation{
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2e"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-037f85e8d0ac522bf"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2f"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-0654d15954855f678"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2g"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-0b821ff26c16ab814"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2h"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-089b77e7410afbffc"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d2a"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2882"),
+						SubnetId:                pointerStr("subnet-09b551ae9080f9e09"),
+					},
+				},
+				Routes: []*ec2.Route{
+					{
+						DestinationCidrBlock: pointerStr("0.0.0.0/0"),
+						NatGatewayId:         pointerStr("nat-042f61761ad1b2bd2"),
+						Origin:               pointerStr("CreateRoute"),
+						State:                pointerStr("active"),
+					},
+					{
+						DestinationCidrBlock: pointerStr("10.3.240.0/23"),
+						GatewayId:            pointerStr("local"),
+						Origin:               pointerStr("CreateRouteTable"),
+						State:                pointerStr("active"),
+					},
+				},
+			},
+
+			// public
+			{
+				VpcId:        vpcId,
+				OwnerId:      ownerId,
+				RouteTableId: pointerStr("rtb-050839aaecc6e2883"),
+				Associations: []*ec2.RouteTableAssociation{
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d20"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2883"),
+						SubnetId:                pointerStr("subnet-070106850be5ea4b4"),
+					},
+					{
+						AssociationState:        &ec2.RouteTableAssociationState{State: pointerStr("associated")},
+						Main:                    pointerBool(false),
+						RouteTableAssociationId: pointerStr("rtbassoc-06182d90e0a141d21"),
+						RouteTableId:            pointerStr("rtb-050839aaecc6e2883"),
+						SubnetId:                pointerStr("subnet-041edac8b8ee9ca1e"),
+					},
+				},
+				Routes: []*ec2.Route{
+					{
+						DestinationCidrBlock: pointerStr("0.0.0.0/0"),
+						GatewayId:            pointerStr("igw-0be55db08bd331c3a"),
+						Origin:               pointerStr("CreateRoute"),
+						State:                pointerStr("active"),
+					},
+					{
+						DestinationCidrBlock: pointerStr("10.3.240.0/23"),
+						GatewayId:            pointerStr("local"),
+						Origin:               pointerStr("CreateRouteTable"),
+						State:                pointerStr("active"),
+					},
+				},
+			},
+		},
+		aws: awsServices,
+	}
+
+	type fields struct {
+		ec2                   EC2
+		elb                   ELB
+		elbv2                 ELBV2
+		asg                   ASG
+		kms                   KMS
+		metadata              EC2Metadata
+		cfg                   *CloudConfig
+		region                string
+		vpcID                 string
+		tagging               awsTagging
+		selfAWSInstance       *awsInstance
+		instanceCache         instanceCache
+		clientBuilder         cloudprovider.ControllerClientBuilder
+		kubeClient            clientset.Interface
+		nodeInformer          informercorev1.NodeInformer
+		nodeInformerHasSynced cache.InformerSynced
+		eventBroadcaster      record.EventBroadcaster
+		eventRecorder         record.EventRecorder
+		attachingMutex        sync.Mutex
+		attaching             map[types.NodeName]map[mountDevice]EBSVolumeID
+		deviceAllocators      map[types.NodeName]DeviceAllocator
+	}
+	type args struct {
+		internalELB bool
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "test",
+			fields: fields{
+				ec2:     ec2,
+				cfg:     c.cfg,
+				vpcID:   *vpcId,
+				tagging: awsTagging{ClusterID: "rosav1-nqfwp"},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Cloud{
+				ec2:                   tt.fields.ec2,
+				elb:                   tt.fields.elb,
+				elbv2:                 tt.fields.elbv2,
+				asg:                   tt.fields.asg,
+				kms:                   tt.fields.kms,
+				metadata:              tt.fields.metadata,
+				cfg:                   tt.fields.cfg,
+				region:                tt.fields.region,
+				vpcID:                 tt.fields.vpcID,
+				tagging:               tt.fields.tagging,
+				selfAWSInstance:       tt.fields.selfAWSInstance,
+				instanceCache:         tt.fields.instanceCache,
+				clientBuilder:         tt.fields.clientBuilder,
+				kubeClient:            tt.fields.kubeClient,
+				nodeInformer:          tt.fields.nodeInformer,
+				nodeInformerHasSynced: tt.fields.nodeInformerHasSynced,
+				eventBroadcaster:      tt.fields.eventBroadcaster,
+				eventRecorder:         tt.fields.eventRecorder,
+				attachingMutex:        tt.fields.attachingMutex,
+				attaching:             tt.fields.attaching,
+				deviceAllocators:      tt.fields.deviceAllocators,
+			}
+			got, err := c.findELBSubnets(tt.args.internalELB)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Cloud.findELBSubnets() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			t.Errorf("%+v", got)
+			// if !reflect.DeepEqual(got, tt.want) {
+			// 	t.Errorf("Cloud.findELBSubnets() = %v, want %v", got, tt.want)
+			// }
 		})
 	}
 }
